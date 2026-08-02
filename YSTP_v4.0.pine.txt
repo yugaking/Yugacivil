@@ -1,0 +1,475 @@
+// ============================================================================
+//  YUGA SMART TRADER PRO (YSTP) v4.0
+//  Phase 1: Core Engine | Phase 2: Smart Money | Phase 3: AI Confidence
+//  Phase 4: Dashboard  | Phase 5 (partial): Auto Trade Management
+// ============================================================================
+//@version=5
+strategy("Yuga Smart Trader Pro (YSTP) v4.0", shorttitle="YSTP v4.0",
+     overlay=true, initial_capital=100000,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=10,
+     pyramiding=0, calc_on_every_tick=false,
+     max_boxes_count=200, max_labels_count=200, max_lines_count=200)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+grp_trend = "Trend"
+htf1      = input.timeframe("15", "Lower HTF", group=grp_trend)
+htf2      = input.timeframe("60", "Higher HTF", group=grp_trend)
+emaFastLen = input.int(20, "EMA Fast", group=grp_trend)
+emaMidLen  = input.int(50, "EMA Mid", group=grp_trend)
+emaSlowLen = input.int(200, "EMA Slow", group=grp_trend)
+
+grp_ichi = "Ichimoku"
+tenkanLen  = input.int(9, "Tenkan-sen", group=grp_ichi)
+kijunLen   = input.int(26, "Kijun-sen", group=grp_ichi)
+senkouBLen = input.int(52, "Senkou Span B", group=grp_ichi)
+
+grp_macd = "MACD"
+macdFast = input.int(12, "MACD Fast", group=grp_macd)
+macdSlow = input.int(26, "MACD Slow", group=grp_macd)
+macdSig  = input.int(9, "MACD Signal", group=grp_macd)
+
+grp_rsi = "RSI Filter"
+rsiLen = input.int(14, "RSI Length", group=grp_rsi)
+rsiOB  = input.int(70, "RSI Overbought", group=grp_rsi)
+rsiOS  = input.int(30, "RSI Oversold", group=grp_rsi)
+
+grp_vol = "Volume"
+relVolLen = input.int(20, "RelVol Avg Length", group=grp_vol)
+relVolMin = input.float(1.2, "Min Relative Volume", group=grp_vol)
+
+grp_atr = "ATR / Risk Management"
+atrLen       = input.int(14, "ATR Length", group=grp_atr)
+atrSLMult    = input.float(1.5, "ATR Stop Loss Multiplier", group=grp_atr)
+atrTP1R      = input.float(1.5, "Target 1 (in R)", group=grp_atr)
+atrTP2R      = input.float(3.0, "Target 2 (in R)", group=grp_atr)
+partialPct   = input.float(50, "Partial Exit % at Target 1", minval=1, maxval=99, group=grp_atr)
+useBreakeven = input.bool(true, "Move Stop to Breakeven after Target 1", group=grp_atr)
+useTrailing  = input.bool(true, "ATR Trailing Stop after Target 1", group=grp_atr)
+atrTrailMult = input.float(2.0, "ATR Trailing Multiplier", group=grp_atr)
+
+grp_struct = "Smart Money Structure"
+swingLen    = input.int(5, "Swing Lookback (bars each side)", group=grp_struct)
+obLookback  = input.int(15, "Order Block Search Range", group=grp_struct)
+fvgMinSize  = input.float(0.0, "Min FVG Size (points)", group=grp_struct)
+
+grp_score = "AI Confidence"
+minConfidence = input.int(70, "Minimum Confidence % to Trade", group=grp_score)
+
+grp_disp = "Display"
+showDashboard = input.bool(true, "Show Dashboard", group=grp_disp)
+showExplain   = input.bool(true, "Show Signal Explanation Panel", group=grp_disp)
+showOB        = input.bool(true, "Show Order Blocks", group=grp_disp)
+showFVG       = input.bool(true, "Show FVGs", group=grp_disp)
+showPivots    = input.bool(true, "Show Daily/Weekly Pivots", group=grp_disp)
+showSwings    = input.bool(false, "Show Swing Labels", group=grp_disp)
+
+// ============================================================================
+// PHASE 1 — CORE ENGINE
+// ============================================================================
+
+// --- EMAs ---
+emaFast = ta.ema(close, emaFastLen)
+emaMid  = ta.ema(close, emaMidLen)
+emaSlow = ta.ema(close, emaSlowLen)
+emaStackBull = emaFast > emaMid and emaMid > emaSlow
+emaStackBear = emaFast < emaMid and emaMid < emaSlow
+
+// --- Multi-timeframe trend ---
+htf1Bull = request.security(syminfo.tickerid, htf1, ta.ema(close, 20) > ta.ema(close, 50))
+htf2Bull = request.security(syminfo.tickerid, htf2, ta.ema(close, 20) > ta.ema(close, 50))
+htfBullish = htf1Bull and htf2Bull
+htfBearish = not htf1Bull and not htf2Bull
+
+// --- Ichimoku ---
+donchian(len) => math.avg(ta.highest(high, len), ta.lowest(low, len))
+tenkan  = donchian(tenkanLen)
+kijun   = donchian(kijunLen)
+senkouA = math.avg(tenkan, kijun)
+senkouB = donchian(senkouBLen)
+cloudTop    = math.max(senkouA, senkouB)
+cloudBottom = math.min(senkouA, senkouB)
+aboveCloud  = close > cloudTop
+belowCloud  = close < cloudBottom
+tenkanKijunBull = tenkan > kijun
+tenkanKijunBear = tenkan < kijun
+plot(senkouA, "Senkou A", color=color.new(color.green, 70), offset=kijunLen)
+plot(senkouB, "Senkou B", color=color.new(color.red, 70), offset=kijunLen)
+p1 = plot(senkouA, display=display.none, offset=kijunLen)
+p2 = plot(senkouB, display=display.none, offset=kijunLen)
+fill(p1, p2, color = senkouA > senkouB ? color.new(color.green, 88) : color.new(color.red, 88))
+plot(emaFast, "EMA Fast", color=color.yellow)
+plot(emaMid, "EMA Mid", color=color.orange)
+plot(emaSlow, "EMA Slow", color=color.red)
+
+// --- MACD ---
+[macdLine, signalLine, histLine] = ta.macd(close, macdFast, macdSlow, macdSig)
+macdBullish = macdLine > signalLine and histLine > 0
+macdBearish = macdLine < signalLine and histLine < 0
+
+// --- RSI (filter only) ---
+rsiVal = ta.rsi(close, rsiLen)
+rsiOkLong  = rsiVal < rsiOB
+rsiOkShort = rsiVal > rsiOS
+
+// --- VWAP ---
+vwapVal = ta.vwap(hlc3)
+plot(vwapVal, "VWAP", color=color.aqua, linewidth=1)
+aboveVWAP = close > vwapVal
+belowVWAP = close < vwapVal
+
+// --- Daily & Weekly Pivots ---
+dH = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_off)
+dL = request.security(syminfo.tickerid, "D", low[1], lookahead=barmerge.lookahead_off)
+dC = request.security(syminfo.tickerid, "D", close[1], lookahead=barmerge.lookahead_off)
+pivotD = (dH + dL + dC) / 3
+r1D = 2 * pivotD - dL
+s1D = 2 * pivotD - dH
+
+wH = request.security(syminfo.tickerid, "W", high[1], lookahead=barmerge.lookahead_off)
+wL = request.security(syminfo.tickerid, "W", low[1], lookahead=barmerge.lookahead_off)
+wC = request.security(syminfo.tickerid, "W", close[1], lookahead=barmerge.lookahead_off)
+pivotW = (wH + wL + wC) / 3
+r1W = 2 * pivotW - wL
+s1W = 2 * pivotW - wH
+
+plot(showPivots ? pivotD : na, "Daily Pivot", color=color.new(color.white, 30), style=plot.style_circles)
+plot(showPivots ? r1D : na, "R1 Daily", color=color.new(color.red, 50), style=plot.style_circles)
+plot(showPivots ? s1D : na, "S1 Daily", color=color.new(color.green, 50), style=plot.style_circles)
+plot(showPivots ? pivotW : na, "Weekly Pivot", color=color.new(color.white, 60), linewidth=2)
+
+// --- Relative Volume ---
+avgVol = ta.sma(volume, relVolLen)
+relVol = avgVol != 0 ? volume / avgVol : 0
+volOk  = relVol >= relVolMin
+
+// --- ATR ---
+atrVal = ta.atr(atrLen)
+
+// --- Market condition (ADX) ---
+[diPlus, diMinus, adxVal] = ta.dmi(14, 14)
+marketTrending = adxVal > 20
+marketState = marketTrending ? "Trending" : "Ranging"
+
+// ============================================================================
+// PHASE 2 — SMART MONEY ENGINE
+// ============================================================================
+
+// --- Swing High/Low ---
+swH = ta.pivothigh(high, swingLen, swingLen)
+swL = ta.pivotlow(low, swingLen, swingLen)
+
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+
+if not na(swH)
+    lastSwingHigh := swH
+    if showSwings
+        label.new(bar_index - swingLen, swH, "H", style=label.style_label_down, color=color.new(color.red, 60), textcolor=color.white, size=size.tiny)
+if not na(swL)
+    lastSwingLow := swL
+    if showSwings
+        label.new(bar_index - swingLen, swL, "L", style=label.style_label_up, color=color.new(color.green, 60), textcolor=color.white, size=size.tiny)
+
+// --- BOS / CHoCH ---
+var string trendState = "neutral"
+string prevTrendState = trendState
+
+bullishBOS = not na(lastSwingHigh) and ta.crossover(close, lastSwingHigh)
+bearishBOS = not na(lastSwingLow) and ta.crossunder(close, lastSwingLow)
+
+if bullishBOS
+    trendState := "bullish"
+if bearishBOS
+    trendState := "bearish"
+
+bullishCHoCH = bullishBOS and prevTrendState == "bearish"
+bearishCHoCH = bearishBOS and prevTrendState == "bullish"
+
+if bullishBOS
+    label.new(bar_index, low, bullishCHoCH ? "CHoCH" : "BOS", style=label.style_label_up, color=color.new(color.lime, 20), textcolor=color.black, size=size.small)
+if bearishBOS
+    label.new(bar_index, high, bearishCHoCH ? "CHoCH" : "BOS", style=label.style_label_down, color=color.new(color.red, 20), textcolor=color.white, size=size.small)
+
+structureBullish = trendState == "bullish"
+structureBearish = trendState == "bearish"
+
+// --- Order Blocks ---
+var box[] bullObBoxes = array.new_box()
+var box[] bearObBoxes = array.new_box()
+var float lastBullObTop = na
+var float lastBullObBot = na
+var float lastBearObTop = na
+var float lastBearObBot = na
+
+if bullishBOS
+    int idxB = -1
+    for i = 1 to obLookback
+        if close[i] < open[i]
+            idxB := i
+            break
+    if idxB != -1
+        obTop = high[idxB]
+        obBot = low[idxB]
+        lastBullObTop := obTop
+        lastBullObBot := obBot
+        if showOB
+            b = box.new(bar_index[idxB], obTop, bar_index + 20, obBot, border_color=color.green, bgcolor=color.new(color.green, 85))
+            array.push(bullObBoxes, b)
+            if array.size(bullObBoxes) > 10
+                box.delete(array.shift(bullObBoxes))
+
+if bearishBOS
+    int idxS = -1
+    for i = 1 to obLookback
+        if close[i] > open[i]
+            idxS := i
+            break
+    if idxS != -1
+        obTop2 = high[idxS]
+        obBot2 = low[idxS]
+        lastBearObTop := obTop2
+        lastBearObBot := obBot2
+        if showOB
+            b2 = box.new(bar_index[idxS], obTop2, bar_index + 20, obBot2, border_color=color.red, bgcolor=color.new(color.red, 85))
+            array.push(bearObBoxes, b2)
+            if array.size(bearObBoxes) > 10
+                box.delete(array.shift(bearObBoxes))
+
+nearBullOB = not na(lastBullObBot) and low <= lastBullObTop and low >= lastBullObBot
+nearBearOB = not na(lastBearObTop) and high >= lastBearObBot and high <= lastBearObTop
+
+// --- Fair Value Gaps ---
+var box[] fvgBoxes = array.new_box()
+bullFVG = low > high[2] and (low - high[2]) >= fvgMinSize
+bearFVG = high < low[2] and (low[2] - high) >= fvgMinSize
+
+if bullFVG and showFVG
+    fb = box.new(bar_index[2], low, bar_index, high[2], border_color=color.blue, bgcolor=color.new(color.blue, 85))
+    array.push(fvgBoxes, fb)
+    if array.size(fvgBoxes) > 15
+        box.delete(array.shift(fvgBoxes))
+if bearFVG and showFVG
+    fb2 = box.new(bar_index[2], low[2], bar_index, high, border_color=color.purple, bgcolor=color.new(color.purple, 85))
+    array.push(fvgBoxes, fb2)
+    if array.size(fvgBoxes) > 15
+        box.delete(array.shift(fvgBoxes))
+
+recentBullFVG = ta.barssince(bullFVG) <= 15
+recentBearFVG = ta.barssince(bearFVG) <= 15
+
+// --- Liquidity Sweeps ---
+bearishSweep = not na(lastSwingHigh) and high > lastSwingHigh and close < lastSwingHigh
+bullishSweep = not na(lastSwingLow) and low < lastSwingLow and close > lastSwingLow
+
+if bullishSweep
+    label.new(bar_index, low, "SWEEP", style=label.style_label_up, color=color.new(color.teal, 30), textcolor=color.white, size=size.tiny)
+if bearishSweep
+    label.new(bar_index, high, "SWEEP", style=label.style_label_down, color=color.new(color.maroon, 30), textcolor=color.white, size=size.tiny)
+
+// ============================================================================
+// PHASE 3 — AI CONFIDENCE ENGINE
+// ============================================================================
+
+// Long conditions (11 checks)
+c1L = htfBullish
+c2L = emaStackBull
+c3L = aboveCloud
+c4L = tenkanKijunBull
+c5L = macdBullish
+c6L = rsiOkLong
+c7L = aboveVWAP
+c8L = volOk
+c9L = structureBullish or bullishBOS
+c10L = nearBullOB or (bar_index - (na(array.size(bullObBoxes)) ? bar_index : bar_index)) >= 0 and not na(lastBullObTop)
+c11L = recentBullFVG and not bearishSweep
+
+longChecks = array.from(c1L, c2L, c3L, c4L, c5L, c6L, c7L, c8L, c9L, c10L, c11L)
+int longPassed = 0
+for i = 0 to array.size(longChecks) - 1
+    if array.get(longChecks, i)
+        longPassed += 1
+confidenceLong = math.round(longPassed / array.size(longChecks) * 100)
+
+// Short conditions (11 checks)
+c1S = htfBearish
+c2S = emaStackBear
+c3S = belowCloud
+c4S = tenkanKijunBear
+c5S = macdBearish
+c6S = rsiOkShort
+c7S = belowVWAP
+c8S = volOk
+c9S = structureBearish or bearishBOS
+c10S = nearBearOB or not na(lastBearObTop)
+c11S = recentBearFVG and not bullishSweep
+
+shortChecks = array.from(c1S, c2S, c3S, c4S, c5S, c6S, c7S, c8S, c9S, c10S, c11S)
+int shortPassed = 0
+for i = 0 to array.size(shortChecks) - 1
+    if array.get(shortChecks, i)
+        shortPassed += 1
+confidenceShort = math.round(shortPassed / array.size(shortChecks) * 100)
+
+getQuality(conf) =>
+    string q = conf >= 95 ? "A+ Setup" : conf >= 90 ? "A Setup" : conf >= 80 ? "B Setup" : conf >= 70 ? "C Setup" : "Avoid Trade"
+    q
+
+qualityLong  = getQuality(confidenceLong)
+qualityShort = getQuality(confidenceShort)
+
+// ============================================================================
+// SIGNAL GENERATION
+// ============================================================================
+longTrigger  = (bullishBOS or bullishCHoCH) and confidenceLong >= minConfidence and strategy.position_size == 0
+shortTrigger = (bearishBOS or bearishCHoCH) and confidenceShort >= minConfidence and strategy.position_size == 0
+
+// ============================================================================
+// PHASE 1 + 5 — RISK & AUTO TRADE MANAGEMENT
+// ============================================================================
+var float longStop  = na
+var float longTP1   = na
+var float longTP2   = na
+var bool  longTP1Done = false
+var float longEntryPrice = na
+
+var float shortStop  = na
+var float shortTP1   = na
+var float shortTP2   = na
+var bool  shortTP1Done = false
+var float shortEntryPrice = na
+
+riskLong  = atrVal * atrSLMult
+riskShort = atrVal * atrSLMult
+
+if longTrigger
+    longEntryPrice := close
+    longStop  := close - riskLong
+    longTP1   := close + riskLong * atrTP1R
+    longTP2   := close + riskLong * atrTP2R
+    longTP1Done := false
+    strategy.entry("Long", strategy.long)
+    strategy.exit("L-TP1", from_entry="Long", limit=longTP1, qty_percent=partialPct)
+
+if shortTrigger
+    shortEntryPrice := close
+    shortStop := close + riskShort
+    shortTP1  := close - riskShort * atrTP1R
+    shortTP2  := close - riskShort * atrTP2R
+    shortTP1Done := false
+    strategy.entry("Short", strategy.short)
+    strategy.exit("S-TP1", from_entry="Short", limit=shortTP1, qty_percent=partialPct)
+
+// detect TP1 fill by price touching the level while in position
+if strategy.position_size > 0 and not longTP1Done and high >= longTP1
+    longTP1Done := true
+if strategy.position_size < 0 and not shortTP1Done and low <= shortTP1
+    shortTP1Done := true
+
+// breakeven + trailing management for the runner
+if strategy.position_size > 0
+    if useBreakeven and longTP1Done and longStop < longEntryPrice
+        longStop := longEntryPrice
+    if useTrailing and longTP1Done
+        trailCandidate = close - atrVal * atrTrailMult
+        if trailCandidate > longStop
+            longStop := trailCandidate
+    strategy.exit("L-Runner", from_entry="Long", stop=longStop, limit=longTP2)
+
+if strategy.position_size < 0
+    if useBreakeven and shortTP1Done and shortStop > shortEntryPrice
+        shortStop := shortEntryPrice
+    if useTrailing and shortTP1Done
+        trailCandidate2 = close + atrVal * atrTrailMult
+        if trailCandidate2 < shortStop
+            shortStop := trailCandidate2
+    strategy.exit("S-Runner", from_entry="Short", stop=shortStop, limit=shortTP2)
+
+if strategy.position_size == 0
+    longTP1Done := false
+    shortTP1Done := false
+
+// ============================================================================
+// PHASE 4 — DASHBOARD
+// ============================================================================
+var int todayTrades = 0
+newDay = ta.change(time("D")) != 0
+if newDay
+    todayTrades := 0
+if strategy.closedtrades > strategy.closedtrades[1]
+    todayTrades += 1
+
+winRate = strategy.closedtrades > 0 ? (strategy.wintrades / strategy.closedtrades) * 100 : na
+profitFactor = strategy.grossloss != 0 ? strategy.grossprofit / math.abs(strategy.grossloss) : na
+avgWin  = strategy.wintrades > 0 ? strategy.grossprofit / strategy.wintrades : na
+avgLoss = strategy.losstrades > 0 ? math.abs(strategy.grossloss) / strategy.losstrades : na
+rr = (not na(avgWin) and not na(avgLoss) and avgLoss != 0) ? avgWin / avgLoss : na
+ddPct = strategy.equity != 0 ? (strategy.max_drawdown / strategy.equity) * 100 : na
+
+overallTrend = emaStackBull and htfBullish ? "Bullish" : emaStackBear and htfBearish ? "Bearish" : "Mixed"
+overallConfidence = overallTrend == "Bullish" ? confidenceLong : overallTrend == "Bearish" ? confidenceShort : math.max(confidenceLong, confidenceShort)
+
+if showDashboard and barstate.islast
+    var table dash = table.new(position.top_right, 2, 9, bgcolor=color.new(color.black, 20), border_width=1, border_color=color.gray)
+    table.cell(dash, 0, 0, "YSTP v4.0", text_color=color.white, bgcolor=color.new(color.blue, 40), text_size=size.small)
+    table.cell(dash, 1, 0, "", bgcolor=color.new(color.blue, 40))
+    table.cell(dash, 0, 1, "Trend", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 1, overallTrend, text_color=overallTrend == "Bullish" ? color.lime : overallTrend == "Bearish" ? color.red : color.orange, text_size=size.small)
+    table.cell(dash, 0, 2, "Confidence", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 2, str.tostring(overallConfidence) + "%", text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 3, "Today's Trades", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 3, str.tostring(todayTrades), text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 4, "Win Rate", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 4, na(winRate) ? "n/a" : str.tostring(math.round(winRate)) + "%", text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 5, "RR", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 5, na(rr) ? "n/a" : "1 : " + str.tostring(rr, "#.##"), text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 6, "Profit Factor", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 6, na(profitFactor) ? "n/a" : str.tostring(profitFactor, "#.##"), text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 7, "Drawdown", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 7, na(ddPct) ? "n/a" : str.tostring(ddPct, "#.##") + "%", text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 8, "Market", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 8, marketState, text_color=color.white, text_size=size.small)
+
+// ============================================================================
+// SIGNAL EXPLANATION PANEL
+// ============================================================================
+buildReasons(bool a, bool b, bool c, bool d, bool e, bool f, bool g, bool h, bool i, bool j, bool k) =>
+    string txt = ""
+    txt := txt + (a ? "✔ Higher Timeframe Aligned\n" : "✘ Higher Timeframe Not Aligned\n")
+    txt := txt + (b ? "✔ EMA Stack Aligned\n" : "✘ EMA Stack Not Aligned\n")
+    txt := txt + (c ? "✔ Ichimoku Cloud Confirmed\n" : "✘ Ichimoku Cloud Not Confirmed\n")
+    txt := txt + (d ? "✔ Tenkan/Kijun Confirmed\n" : "✘ Tenkan/Kijun Not Confirmed\n")
+    txt := txt + (e ? "✔ MACD Confirmed\n" : "✘ MACD Not Confirmed\n")
+    txt := txt + (f ? "✔ RSI Healthy\n" : "✘ RSI Not Healthy\n")
+    txt := txt + (g ? "✔ VWAP Confirmed\n" : "✘ VWAP Not Confirmed\n")
+    txt := txt + (h ? "✔ Volume Above Average\n" : "✘ Volume Below Average\n")
+    txt := txt + (i ? "✔ Structure (BOS/CHoCH) Confirmed\n" : "✘ Structure Not Confirmed\n")
+    txt := txt + (j ? "✔ Order Block Support\n" : "✘ No Order Block Support\n")
+    txt := txt + (k ? "✔ FVG Present / No Opposing Sweep\n" : "✘ No FVG / Opposing Sweep Detected\n")
+    txt
+
+if showExplain and longTrigger
+    reasons = buildReasons(c1L, c2L, c3L, c4L, c5L, c6L, c7L, c8L, c9L, c10L, c11L)
+    txt = "🟢 BUY SIGNAL\nConfidence: " + str.tostring(confidenceLong) + "%  (" + qualityLong + ")\n\nReasons:\n" + reasons +
+          "\nStop Loss: " + str.tostring(longStop, format.mintick) +
+          "\nTarget 1: " + str.tostring(longTP1, format.mintick) +
+          "\nTarget 2: " + str.tostring(longTP2, format.mintick)
+    label.new(bar_index, low - atrVal, txt, style=label.style_label_up, color=color.new(color.green, 10), textcolor=color.white, size=size.small, textalign=text.align_left)
+
+if showExplain and shortTrigger
+    reasonsS = buildReasons(c1S, c2S, c3S, c4S, c5S, c6S, c7S, c8S, c9S, c10S, c11S)
+    txtS = "🔴 SELL SIGNAL\nConfidence: " + str.tostring(confidenceShort) + "%  (" + qualityShort + ")\n\nReasons:\n" + reasonsS +
+           "\nStop Loss: " + str.tostring(shortStop, format.mintick) +
+           "\nTarget 1: " + str.tostring(shortTP1, format.mintick) +
+           "\nTarget 2: " + str.tostring(shortTP2, format.mintick)
+    label.new(bar_index, high + atrVal, txtS, style=label.style_label_down, color=color.new(color.red, 10), textcolor=color.white, size=size.small, textalign=text.align_left)
+
+// ============================================================================
+// CHART SIGNAL MARKERS + ALERTS
+// ============================================================================
+plotshape(longTrigger, title="Buy Signal", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.small)
+plotshape(shortTrigger, title="Sell Signal", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
+
+alertcondition(longTrigger, title="YSTP Long Signal", message="YSTP v4.0: BUY signal on {{ticker}} at {{close}}")
+alertcondition(shortTrigger, title="YSTP Short Signal", message="YSTP v4.0: SELL signal on {{ticker}} at {{close}}")
